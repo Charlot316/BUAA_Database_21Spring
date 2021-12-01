@@ -1,0 +1,121 @@
+--不处理异常
+PRINT 'Before Error'
+SELECT 1/0
+PRINT 'After Error'
+GO
+
+--加入异常处理
+BEGIN TRY
+	PRINT 'Before Error'
+	SELECT 1/0
+	PRINT 'After Error'
+END TRY
+BEGIN CATCH
+	SELECT text FROM sys.messages
+		WHERE language_id=2052
+		AND message_id=@@ERROR
+END CATCH
+GO
+
+--自定义错误/自动抛出错误
+EXECUTE sp_addmessage 233333,10,'A user-defined error.','us_english'
+RAISERROR (233333,10,1)
+RAISERROR ('This is a tmp error message',10,1)
+
+--简单事务控制流
+BEGIN TRANSACTION T1
+	PRINT ('Begin T1')
+	INSERT INTO Test VALUES(1,0.1)
+SAVE TRANSACTION S1
+	PRINT ('Save S1')
+	INSERT INTO Test VALUES(2,0.2)
+SAVE TRANSACTION S2
+	PRINT ('Save S2')
+	INSERT INTO Test VALUES(3,0.3)
+ROLLBACK TRANSACTION S1
+COMMIT TRANSACTION T1
+GO
+
+--一般的事务框架：加入错误处理
+BEGIN TRY
+	BEGIN TRANSACTION T
+		INSERT INTO Test VALUES(1,0.1)
+		INSERT INTO Test VALUES(2,0.2)
+		--主键冲突
+		INSERT INTO Test VALUES(2,0.2)
+		INSERT INTO Test VALUES(3,0.3)
+	COMMIT TRANSACTION T
+END TRY
+BEGIN CATCH
+	PRINT ('Error Caught')
+	ROLLBACK TRANSACTION T
+END CATCH
+GO
+
+--查看当前锁的状况
+EXECUTE sp_lock
+SELECT * FROM sys.dm_tran_locks
+
+--手动修改事务隔离层级
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+GO
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+GO
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
+GO
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+GO
+
+--锁的忙等待
+--用户1.sql
+--用户1先到，进行一个需要锁表的操作
+BEGIN TRANSACTION T1
+    SELECT * FROM Test WITH (HOLDLOCK,XLOCK)
+--用户1一直不提交T1
+
+
+--用户1终于决定提交
+COMMIT TRANSACTION T1
+--之后用户2的UPDATE才被允许执行
+
+--用户2.sql
+--用户2后来，尝试修改被锁的表
+BEGIN TRANSACTION T2
+    UPDATE Test SET val = 2
+        WHERE id = 1
+--导致用户2的操作忙等待
+COMMIT TRANSACTION T2
+
+--手工模拟死锁
+--用户1
+--用户1：OK
+BEGIN TRANSACTION T1
+SELECT * FROM Test WITH (HOLDLOCK,XLOCK) WHERE id = 1
+
+--用户1：忙等待
+SELECT * FROM Test WITH (HOLDLOCK,XLOCK) WHERE id = 2
+
+--用户2
+--用户2：OK
+BEGIN TRANSACTION T2
+SELECT * FROM Test WITH (HOLDLOCK,XLOCK) WHERE id = 2
+
+--用户2：死锁构成
+SELECT * FROM Test WITH (HOLDLOCK,XLOCK) WHERE id = 1
+
+--日志Undo
+BEGIN TRAN MakeACrash
+	INSERT INTO Test VALUES(4,0.4)
+	INSERT INTO Test VALUES(5,0.5)
+	--未提交却强制使得脏页写入磁盘
+	CHECKPOINT
+	GO
+	--查看一下可见此时确实有新行写入
+	SELECT * FROM Test
+
+--然后杀死进程mssqlserver
+--注意是服务端进程而不是客户端SSMS
+--然后重新连接，查看Undo回复后的写入情况
+SELECT * FROM Test
+--查看数据库事务日志
+SELECT * FROM sys.fn_dblog(NULL,NULL)
